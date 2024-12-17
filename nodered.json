@@ -1,0 +1,370 @@
+[
+    {
+        "id": "d39f2616518472f3",
+        "type": "tab",
+        "label": "Flow 1",
+        "disabled": false,
+        "info": ""
+    },
+    {
+        "id": "7d43fc1b105a6dd3",
+        "type": "inject",
+        "z": "d39f2616518472f3",
+        "name": "Fetch CPU Usage",
+        "props": [],
+        "repeat": "5",
+        "crontab": "",
+        "once": true,
+        "onceDelay": 0.1,
+        "topic": "",
+        "x": 150,
+        "y": 40,
+        "wires": [
+            [
+                "348969dbb7c5d0eb"
+            ]
+        ]
+    },
+    {
+        "id": "348969dbb7c5d0eb",
+        "type": "exec",
+        "z": "d39f2616518472f3",
+        "command": "C:\\Users\\hello\\anaconda3\\envs\\myenv\\python.exe",
+        "addpay": false,
+        "append": "C:\\Users\\hello\\Desktop\\Project_me\\tiny_llama_rag_forecast\\get_cpu_usage.py",
+        "useSpawn": "false",
+        "timer": "",
+        "winHide": false,
+        "oldrc": false,
+        "name": "Get CPU Usage",
+        "x": 340,
+        "y": 40,
+        "wires": [
+            [
+                "8de7e716317bf18c"
+            ],
+            [],
+            []
+        ]
+    },
+    {
+        "id": "ab72c0134345ec06",
+        "type": "influxdb out",
+        "z": "d39f2616518472f3",
+        "influxdb": "f802de089da6eb92",
+        "name": "cpu",
+        "measurement": "cpu_usage",
+        "precision": "",
+        "retentionPolicy": "",
+        "database": "database",
+        "precisionV18FluxV20": "s",
+        "retentionPolicyV18Flux": "",
+        "org": "ollama",
+        "bucket": "cpu",
+        "x": 670,
+        "y": 40,
+        "wires": []
+    },
+    {
+        "id": "8de7e716317bf18c",
+        "type": "function",
+        "z": "d39f2616518472f3",
+        "name": "function 1",
+        "func": "// รับค่า payload เช่น \"CPU Usage: 9.4%\"\n// ตัดคำว่า \"CPU Usage:\" และ \"%\" ออก\nlet cpuUsageString = msg.payload.replace(\"CPU Usage:\", \"\").replace(\"%\", \"\").trim();\n\n// แปลงเป็นตัวเลข\nlet cpuUsage = parseFloat(cpuUsageString);\n\n// ตรวจสอบว่า cpuUsage แปลงสำเร็จ\nif (isNaN(cpuUsage)) {\n    node.error(\"Invalid CPU usage value\", msg);\n    return null; // หยุดการทำงานหากค่าไม่ถูกต้อง\n}\n\n// ส่งค่าที่แปลงแล้วกลับไป (เฉพาะ value)\nmsg.payload = cpuUsage;\n\nreturn msg;\n",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 520,
+        "y": 40,
+        "wires": [
+            [
+                "ab72c0134345ec06"
+            ]
+        ]
+    },
+    {
+        "id": "af123640e4ebbfe0",
+        "type": "inject",
+        "z": "d39f2616518472f3",
+        "name": "Fetch Model Run",
+        "props": [],
+        "repeat": "15",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "5",
+        "topic": "",
+        "x": 130,
+        "y": 220,
+        "wires": [
+            [
+                "adef619288edce15"
+            ]
+        ]
+    },
+    {
+        "id": "adef619288edce15",
+        "type": "influxdb in",
+        "z": "d39f2616518472f3",
+        "influxdb": "f802de089da6eb92",
+        "name": "CPU_Usage_input",
+        "query": "from(bucket: \"cpu\")\n  |> range(start: -10m)  // ดึงข้อมูลย้อนหลัง 30 นาที\n  |> filter(fn: (r) => r[\"_measurement\"] == \"cpu_usage\")\n  |> filter(fn: (r) => exists r[\"_value\"])  // ดึงเฉพาะข้อมูลที่มีฟิลด์ _value\n  |> aggregateWindow(every: 5s, fn: last, createEmpty: false)  // ดึงข้อมูลทุกๆ 5 วินาที\n  |> yield(name: \"last\")\n",
+        "rawOutput": false,
+        "precision": "",
+        "retentionPolicy": "",
+        "org": "ollama",
+        "x": 350,
+        "y": 220,
+        "wires": [
+            [
+                "66fb4f6bfb90aefd"
+            ]
+        ]
+    },
+    {
+        "id": "66fb4f6bfb90aefd",
+        "type": "function",
+        "z": "d39f2616518472f3",
+        "name": "function 2",
+        "func": "// function 2\nif (Array.isArray(msg.payload)) {\n    try {\n        // เลือกเฉพาะข้อมูลล่าสุด\n        const latestData = msg.payload[msg.payload.length - 1];\n        \n        // แปลงข้อมูล\n        const data = {\n            ds: new Date(latestData._time).toISOString(),\n            y: parseFloat(latestData._value),\n            unique_id: 'cpu_temp'\n        };\n\n        // สร้างโครงสร้างที่ FastAPI ต้องการ\n        msg.payload = { data: [data] };\n        \n        node.warn(\"Sending latest data: \" + JSON.stringify(msg.payload));\n        \n    } catch (err) {\n        node.error(\"Error processing data: \" + err.message);\n        return null;\n    }\n} else {\n    node.error(\"Invalid payload format\");\n    return null;\n}\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 560,
+        "y": 220,
+        "wires": [
+            [
+                "66b7adf816d4bbd7"
+            ]
+        ]
+    },
+    {
+        "id": "66b7adf816d4bbd7",
+        "type": "http request",
+        "z": "d39f2616518472f3",
+        "name": "Arima_predict",
+        "method": "POST",
+        "ret": "obj",
+        "paytoqs": "ignore",
+        "url": "http://localhost:8000/forecast",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [],
+        "x": 760,
+        "y": 220,
+        "wires": [
+            [
+                "571cb3e7ca53412b"
+            ]
+        ]
+    },
+    {
+        "id": "abe0f48146f5dd19",
+        "type": "comment",
+        "z": "d39f2616518472f3",
+        "name": "Query (360 Data point (30min x 5s ))",
+        "info": "",
+        "x": 220,
+        "y": 180,
+        "wires": []
+    },
+    {
+        "id": "571cb3e7ca53412b",
+        "type": "function",
+        "z": "d39f2616518472f3",
+        "name": "function 3",
+        "func": "if (msg.payload && Array.isArray(msg.payload) && msg.payload.length > 0) {\n    try {\n        const prediction = msg.payload[0];\n        const predTime = new Date(prediction.ds);\n        predTime.setMilliseconds(0);  // ตัดมิลลิวินาที\n\n        // เก็บค่าทำนายและเวลา\n        const predictionData = {\n            timestamp: predTime.toISOString(),  // เก็บในรูปแบบ ISO string\n            predicted: prediction.AutoARIMA,\n            evaluated: false\n        };\n\n        // เก็บใน context และจำกัดจำนวน\n        let predictions = flow.get(\"predictions\") || [];\n        predictions = predictions.filter(p => !p.evaluated);  // เก็บเฉพาะที่ยังไม่ได้ประเมิน\n        if (predictions.length > 100) {  // จำกัดจำนวนการเก็บ\n            predictions.shift();  // ลบตัวเก่าสุดออก\n        }\n        predictions.push(predictionData);\n        flow.set(\"predictions\", predictions);\n\n        node.warn(`Stored prediction for ${predTime.toISOString()} = ${prediction.AutoARIMA}`);\n\n    } catch (err) {\n        node.error(\"Error storing prediction: \" + err.message);\n        return null;\n    }\n}\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 960,
+        "y": 220,
+        "wires": [
+            [
+                "9d44f78586ddd4b7",
+                "b4a117fab987fa4f"
+            ]
+        ]
+    },
+    {
+        "id": "9d44f78586ddd4b7",
+        "type": "influxdb out",
+        "z": "d39f2616518472f3",
+        "influxdb": "f802de089da6eb92",
+        "name": "cpu_predict",
+        "measurement": "cpu_predict",
+        "precision": "",
+        "retentionPolicy": "",
+        "database": "database",
+        "precisionV18FluxV20": "s",
+        "retentionPolicyV18Flux": "",
+        "org": "ollama",
+        "bucket": "cpu",
+        "x": 1170,
+        "y": 220,
+        "wires": []
+    },
+    {
+        "id": "b4a117fab987fa4f",
+        "type": "debug",
+        "z": "d39f2616518472f3",
+        "name": "debug 22",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1140,
+        "y": 280,
+        "wires": []
+    },
+    {
+        "id": "9cd1f7825ed2c66e",
+        "type": "function",
+        "z": "d39f2616518472f3",
+        "name": "function 4",
+        "func": "if (msg.payload && Array.isArray(msg.payload)) {\n    try {\n        const actualData = msg.payload[msg.payload.length - 1];\n        const actualTime = new Date(actualData._time);\n        actualTime.setMilliseconds(0);\n        const actualValue = parseFloat(actualData._value);\n\n        let predictions = flow.get(\"predictions\") || [];\n\n        // แสดงข้อมูลการค้นหา\n        node.warn(`Looking for prediction at ${actualTime.toISOString()}`);\n        node.warn(`Available predictions: ${predictions.length}`);\n\n        // หาค่าทำนายที่ตรงกับเวลาปัจจุบัน\n        const matchingPrediction = predictions.find(p => {\n            const predTime = new Date(p.timestamp);\n            return predTime.getTime() === actualTime.getTime() && !p.evaluated;\n        });\n\n        if (matchingPrediction) {\n            const data = {\n                ds: actualTime.toISOString(),\n                y: actualValue,\n                unique_id: 'cpu_temp'\n            };\n\n            msg.payload = { data: [data] };\n            matchingPrediction.evaluated = true;\n            flow.set(\"predictions\", predictions);\n\n            node.warn(`Found matching prediction: ${JSON.stringify(matchingPrediction)}`);\n        } else {\n            node.warn(`No prediction found for ${actualTime.toISOString()}`);\n            return null;\n        }\n\n    } catch (err) {\n        node.error(\"Error processing evaluation: \" + err.message);\n        return null;\n    }\n}\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 660,
+        "y": 400,
+        "wires": [
+            [
+                "6d3435e9af2ffc5c"
+            ]
+        ]
+    },
+    {
+        "id": "fad4b0227e42e1ac",
+        "type": "inject",
+        "z": "d39f2616518472f3",
+        "name": "Evaluate",
+        "props": [],
+        "repeat": "15",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "10",
+        "topic": "",
+        "x": 220,
+        "y": 400,
+        "wires": [
+            [
+                "2d5469713064c635"
+            ]
+        ]
+    },
+    {
+        "id": "6d3435e9af2ffc5c",
+        "type": "http request",
+        "z": "d39f2616518472f3",
+        "name": "Evaluate",
+        "method": "POST",
+        "ret": "obj",
+        "paytoqs": "ignore",
+        "url": "http://localhost:8000/evaluate",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [],
+        "x": 840,
+        "y": 400,
+        "wires": [
+            [
+                "a529afa911ae03ed"
+            ]
+        ]
+    },
+    {
+        "id": "2d5469713064c635",
+        "type": "influxdb in",
+        "z": "d39f2616518472f3",
+        "influxdb": "f802de089da6eb92",
+        "name": "CPU_Usage_input",
+        "query": "from(bucket: \"cpu\")\n  |> range(start: -10m)  // ดึงข้อมูลย้อนหลัง 30 นาที\n  |> filter(fn: (r) => r[\"_measurement\"] == \"cpu_usage\")\n  |> filter(fn: (r) => exists r[\"_value\"])  // ดึงเฉพาะข้อมูลที่มีฟิลด์ _value\n  |> aggregateWindow(every: 5s, fn: last, createEmpty: false)  // ดึงข้อมูลทุกๆ 5 วินาที\n  |> yield(name: \"last\")\n",
+        "rawOutput": false,
+        "precision": "",
+        "retentionPolicy": "",
+        "org": "ollama",
+        "x": 470,
+        "y": 400,
+        "wires": [
+            [
+                "9cd1f7825ed2c66e"
+            ]
+        ]
+    },
+    {
+        "id": "a529afa911ae03ed",
+        "type": "function",
+        "z": "d39f2616518472f3",
+        "name": "function 5",
+        "func": "if (msg.payload && Array.isArray(msg.payload)) {\n    const evaluation = msg.payload[0];\n\n    // สร้าง payload สำหรับ InfluxDB\n    msg.payload = {\n        measurement: \"model_evaluation\",\n        fields: {\n            mae: evaluation.mae,\n            mse: evaluation.mse,\n            rmse: evaluation.rmse,\n            mape: evaluation.mape,\n            actual: evaluation.actual,\n            predicted: evaluation.predicted\n        },\n        timestamp: evaluation.timestamp\n    };\n} else {\n    node.error(\"Invalid evaluation response\");\n    msg.payload = null;\n}\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1020,
+        "y": 400,
+        "wires": [
+            [
+                "d92e4aa0f2fd8c18"
+            ]
+        ]
+    },
+    {
+        "id": "d92e4aa0f2fd8c18",
+        "type": "debug",
+        "z": "d39f2616518472f3",
+        "name": "debug 23",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1200,
+        "y": 400,
+        "wires": []
+    },
+    {
+        "id": "f802de089da6eb92",
+        "type": "influxdb",
+        "hostname": "127.0.0.1",
+        "port": "8086",
+        "protocol": "http",
+        "database": "database",
+        "name": "DB",
+        "usetls": false,
+        "tls": "",
+        "influxdbVersion": "2.0",
+        "url": "http://localhost:8086",
+        "timeout": "10",
+        "rejectUnauthorized": true
+    }
+]

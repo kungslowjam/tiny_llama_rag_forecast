@@ -1,0 +1,22 @@
+[
+    {
+        "id": "ecad412977abf9af",
+        "type": "function",
+        "z": "5744a189224241b7",
+        "name": "function 4",
+        "func": "// function 4 - สำหรับประเมินผล\nif (msg.payload && Array.isArray(msg.payload)) {\n    try {\n        // ดึงข้อมูลล่าสุด\n        const latestPoint = msg.payload[msg.payload.length - 1];\n        \n        if (!latestPoint) {\n            node.warn(\"ไม่พบข้อมูลล่าสุด\");\n            return null;\n        }\n\n        // ดึงค่าทำนายจาก global context\n        const lastPrediction = global.get('lastPrediction');\n        \n        if (!lastPrediction) {\n            node.warn(\"ไม่พบข้อมูลการทำนาย\");\n            return null;\n        }\n\n        // แปลงเวลาเป็น Date objects\n        const actualTime = new Date(latestPoint._time);\n        const predictTime = new Date(lastPrediction.ds);\n\n        // Debug เวลาและค่า\n        node.warn(`เวลาจริง: ${actualTime.toISOString()}`);\n        node.warn(`เวลาทำนาย: ${predictTime.toISOString()}`);\n        node.warn(`ค่าจริง: ${latestPoint._value}`);\n        node.warn(`ค่าทำนาย: ${lastPrediction.predicted}`);\n\n        // ตรวจสอบว่าค่าจริงมาถึงเวลาที่ทำนายหรือยัง\n        if (actualTime < predictTime) {\n            node.warn(\"รอค่าจริง - เวลาปัจจุบันยังไม่ถึงเวลาที่ทำนาย\");\n            return null;\n        }\n\n        // คำนวณความต่างของเวลา\n        const timeDiff = (actualTime - predictTime) / 1000;\n        node.warn(`ความต่างของเวลา: ${timeDiff} วินาที`);\n\n        // ถ้าเวลาต่างกันไม่เกิน 5 วินาที จึงทำการประเมินผล\n        if (timeDiff <= 5) {\n            const evaluationData = {\n                data: [{\n                    ds: actualTime.toISOString(),\n                    y: parseFloat(latestPoint._value),\n                    unique_id: \"1\"\n                }]\n            };\n\n            node.warn(\"ส่งข้อมูลประเมิน: \" + JSON.stringify(evaluationData));\n            msg.payload = evaluationData;\n            return msg;\n        } else {\n            node.warn(`เวลาต่างกันมากเกินไป: ${timeDiff} วินาที`);\n            return null;\n        }\n\n    } catch (err) {\n        node.error(\"เกิดข้อผิดพลาด: \" + err.message);\n        node.error(\"Stack: \" + err.stack);\n        return null;\n    }\n}\n\nnode.warn(\"ไม่พบข้อมูลที่ถูกต้อง\");\nreturn null;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 2,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 580,
+        "y": 180,
+        "wires": [
+            [
+                "3712e2de5648a05f"
+            ]
+        ]
+    }
+]
