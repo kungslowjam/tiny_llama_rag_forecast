@@ -1,12 +1,13 @@
-import psutil
+import os
 
-def get_cpu_usage():
+def get_cpu_temp():
+    # Read temperature from the thermal_zone0 file
     try:
-        # ดึงเปอร์เซ็นต์การใช้งาน CPU
-        cpu_usage = psutil.cpu_percent(interval=1)  # interval=1 หมายถึงรอ 1 วินาทีก่อนวัดค่า
-        return f"CPU Usage: {cpu_usage}%"
-    except Exception as e:
-        return f"Error: {e}"
+        with open("/sys/class/thermal/thermal_zone0/temp", "r") as file:
+            temp = int(file.read()) / 1000  # Convert from millidegrees to degrees
+            return f"CPU Temperature: {temp:.2f}°C"
+    except FileNotFoundError:
+        return "Could not read temperature. Ensure the path is correct."
 
 if __name__ == "__main__":
-    print(get_cpu_usage())
+    print(get_cpu_temp())

@@ -1,38 +1,37 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List
 import pandas as pd
+import numpy as np
+import os
+import torch
 from statsforecast import StatsForecast
 from statsforecast.models import AutoARIMA
 from neuralforecast import NeuralForecast
 from neuralforecast.models import LSTM
-import numpy as np
-import os
-import torch
-from datetime import datetime, timedelta
+from datetime import datetime
 from ollama import Client
 import asyncio
 
-# ตั้งค่าตัวแปรสภาพแวดล้อมสำหรับ Nixtla
-os.environ['NIXTLA_ID_AS_COL'] = '1'
+# Set CPU-only for PyTorch
+torch.set_num_threads(2)  # Restrict threads to optimize performance on Raspberry Pi
 
-# กำหนดโมเดลข้อมูล
+# Constants and Environment Variables
+MODEL_DIR = "model_checkpoints"
+LATEST_MODEL = "latest_model.pth"
+
+os.makedirs(MODEL_DIR, exist_ok=True)
+
+app = FastAPI()
+
+# Define request data models
 class DataPoint(BaseModel):
-    ds: str  # เวลา
-    y: float  # ค่าจริง
-    unique_id: str  # identifier
+    ds: str
+    y: float
+    unique_id: str
 
 class RequestData(BaseModel):
     data: List[DataPoint]
-
-class EvaluationMetrics(BaseModel):
-    mae: float
-    mse: float
-    rmse: float
-    mape: float
-    actual: float
-    predicted: float
-    timestamp: str
 
 class LLMRequest(BaseModel):
     prompt: str
@@ -40,284 +39,146 @@ class LLMRequest(BaseModel):
     temperature: float = 0.7
     max_tokens: int = 500
 
-# กำหนด FastAPI app
-app = FastAPI()
-
-# ��ก็บค่าทำนายล่าสุดไว้ในหน่วยความจำ
+class EvaluationRequest(BaseModel):
+    actual: List[DataPoint]
+    predictions: List[DataPoint]
+# Global variables
+global_nn_model = None
 last_predictions = {}
 
-# เพิ่มตัวแปร global เก็บโมเดล
-global_nn_model = None
-last_train_time = None
-
-# กำหนดค่าคงที่
-MODEL_DIR = "model_checkpoints"
-LATEST_MODEL = "latest_model.pth"
-BACKUP_FORMAT = "model_%Y%m%d_%H%M%S.pth"
-MAX_BACKUPS = 5
-
-# สร้างโฟลเดอร์เก็บโมเดล
-os.makedirs(MODEL_DIR, exist_ok=True)
-
-# สร้าง Ollama client
-client = Client(host='http://localhost:11434')
-
-# เพิ่มฟังก์ชันสำหรับโหลดโมเดล
-def load_latest_model():
+# Ollama client setup
+try:
+    client = Client(host="http://localhost:11434")
+except Exception as e:
+    print(f"Ollama client error: {str(e)}")
+# Load the latest model
+def load_model():
     global global_nn_model
     try:
-        latest_model_path = os.path.join(MODEL_DIR, LATEST_MODEL)
-        if os.path.exists(latest_model_path):
-            print(f"Loading model from {latest_model_path}")
-            
-            # สร้างโมเดลใหม่
-            model = LSTM(
-                h=1,
-                input_size=24,
-                max_steps=100,
-                batch_size=32,
-                optimizer_kwargs={'lr': 1e-3}
-            )
-            
-            # สร้าง NeuralForecast instance
-            global_nn_model = NeuralForecast(
-                models=[model],
-                freq='5s'
-            )
-            
-            try:
-                # โหลด state dict ด้วย weights_only=True
-                state_dict = torch.load(latest_model_path, weights_only=True)
-                global_nn_model.models[0].load_state_dict(state_dict)
-                
-                # สร้าง dummy data สำหรับ fit
-                dummy_data = pd.DataFrame({
-                    'ds': pd.date_range(start='2024-01-01', periods=24, freq='5s'),
-                    'y': np.random.rand(24),
-                    'unique_id': ['1'] * 24
-                })
-                
-                # ทำ quick fit ด้วย dummy data
-                global_nn_model.fit(dummy_data)
-                
-                print("Model loaded and initialized successfully")
-                return True
-            except Exception as e:
-                print(f"Error initializing model: {str(e)}")
-                global_nn_model = None
-                return False
+        if os.path.exists(os.path.join(MODEL_DIR, LATEST_MODEL)):
+            model = LSTM(h=1, input_size=24, max_steps=50, batch_size=8)  # Reduce batch size
+            global_nn_model = NeuralForecast(models=[model], freq="5s")
+            state_dict = torch.load(os.path.join(MODEL_DIR, LATEST_MODEL), map_location="cpu")
+            global_nn_model.models[0].load_state_dict(state_dict)
+            print("Model loaded successfully")
     except Exception as e:
         print(f"Error loading model: {str(e)}")
-        global_nn_model = None
-    return False
 
-# เรียกโหลดโมเดลตอนเริ่มต้น
 @app.on_event("startup")
-async def startup_event():
-    if load_latest_model():
-        print("Model loaded on startup")
-    else:
-        print("No model found or error loading model")
+def startup_event():
+    load_model()
 
-@app.post("/forecast")
-async def forecast(request_data: RequestData):
-    if not request_data.data:
-        raise HTTPException(status_code=422, detail="Invalid input data")
-    
-    # แปลงข้อมูลเป็น DataFrame
-    df = pd.DataFrame([dp.dict() for dp in request_data.data])
-    
-    # ตรวจสอบข้อมูล
-    if df['ds'].isna().any():
-        raise HTTPException(status_code=422, detail="Invalid timestamp format")
-
-    # สร้างและ fit โมเดล
-    sf = StatsForecast(models=[AutoARIMA()], freq='5s')
-    sf.fit(df)
-    
-    # พยากรณ์
-    forecast_df = sf.forecast(df=df, h=1)
-    
-    # เก็บค่าทำนายและเวลาสุด
-    for _, row in forecast_df.iterrows():
-        last_predictions[row['unique_id']] = {
-            'predicted': row['AutoARIMA'],
-            'timestamp': row['ds'],
-            'actual': df.iloc[-1]['y']
-        }
-    
-    return forecast_df.to_dict(orient='records')
-
-@app.post("/train_neural")
-async def train_neural(request_data: RequestData):
-    global global_nn_model, last_train_time
-    
-    if not request_data.data:
-        raise HTTPException(status_code=422, detail="Invalid input data")
-    
+@app.post("/train")
+async def train_model(request_data: RequestData):
+    global global_nn_model
     try:
-        print("Starting neural network training...")
-        
         df = pd.DataFrame([dp.dict() for dp in request_data.data])
-        df['ds'] = pd.to_datetime(df['ds'])
-        df = df.sort_values('ds')
-        
-        print(f"Training data shape: {df.shape}")
-        
+        df["ds"] = pd.to_datetime(df["ds"])
         if len(df) < 24:
-            raise HTTPException(status_code=422, detail=f"Not enough data points. Got {len(df)}, need at least 24")
+            raise HTTPException(422, "Insufficient data points.")
 
-        # สร้างโมเดล LSTM ใหม่
-        model = LSTM(
-            h=1,
-            input_size=24,
-            max_steps=100,
-            batch_size=32,
-            optimizer_kwargs={'lr': 1e-3}
-        )
-        
-        global_nn_model = NeuralForecast(
-            models=[model],
-            freq='5s'
-        )
-        
-        # ทำการ fit โมเดล และเก็บค่า loss
-        print("Training model...")
-        final_loss = global_nn_model.fit(df)
-        epoch_loss = float(final_loss) if final_loss is not None else 0.0
-        print(f"Final training loss per epoch: {epoch_loss}")
-        
-        last_train_time = datetime.now()
+        # Train model
+        model = LSTM(h=1, input_size=24, max_steps=50, batch_size=8)
+        global_nn_model = NeuralForecast(models=[model], freq="60s")
+        global_nn_model.fit(df)
 
-        # บันทึกโมเดล
-        latest_model_path = os.path.join(MODEL_DIR, LATEST_MODEL)
-        torch.save({
-            'state_dict': global_nn_model.models[0].state_dict(),
-            'final_loss': epoch_loss
-        }, latest_model_path)
-
-        return {
-            "status": "success",
-            "trained_at": last_train_time.isoformat(),
-            "data_points": len(df),
-            "train_loss_epoch": epoch_loss,  # ใช้ค่า loss จริงจากการ train
-            "model_path": latest_model_path,
-            "message": "Model trained and saved successfully"
-        }
-
+        # Save model
+        torch.save(global_nn_model.models[0].state_dict(), os.path.join(MODEL_DIR, LATEST_MODEL))
+        return {"message": "Model trained successfully"}
     except Exception as e:
-        print(f"Error in training: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(500, f"Training error: {str(e)}")
 
-@app.post("/predict_neural")
+
+
+@app.post("/predict")
 async def predict_neural(request_data: RequestData):
-    global global_nn_model, last_train_time, last_predictions
-    
-    if not request_data.data:
-        raise HTTPException(status_code=422, detail="Invalid input data")
-        
-    try:
-        # แปลงข้อมูลเป็น DataFrame
-        df = pd.DataFrame([dp.dict() for dp in request_data.data])
-        df['ds'] = pd.to_datetime(df['ds'])
-        
-        print(f"Input data shape: {df.shape}")
-        print(f"Sample input:\n{df.head()}")
-        
-        # ตรวจสอบว่ามีโมเดลหรือไม่
-        if global_nn_model is None:
-            print("Model not found, attempting to load...")
-            if not load_latest_model():
-                print("Could not load model, need training first")
-                raise HTTPException(status_code=400, detail="Model needs to be trained first")
-        
-        try:
-            # ทำนาย
-            forecast = global_nn_model.predict(df)
-            print(f"Forecast result:\n{forecast}")
-            
-            # แปลง timestamp ให้ถูกต้อง
-            forecast_time = pd.to_datetime(forecast.index[-1])
-            
-            # เก็บค่าทำนายล่าสุด
-            last_prediction = {
-                'predicted': float(forecast.iloc[-1]['LSTM']),
-                'ds': forecast_time.strftime('%Y-%m-%d %H:%M:%S'),
-                'actual': None
-            }
-            
-            # เก็บใน global context
-            last_predictions['1'] = last_prediction
-            
-            print(f"Stored prediction: {last_prediction}")
-            
-            return [{
-                "unique_id": "1",
-                "ds": last_prediction['ds'],
-                "LSTM": last_prediction['predicted']
-            }]
-        except Exception as pred_error:
-            print(f"Prediction failed: {str(pred_error)}")
-            raise HTTPException(status_code=500, detail=f"Prediction failed: {str(pred_error)}")
+    global global_nn_model
+    if global_nn_model is None:
+        load_model()
+    if global_nn_model is None:
+        raise HTTPException(400, "Model not trained yet.")
 
+    try:
+        # Convert input data to DataFrame
+        df = pd.DataFrame([dp.dict() for dp in request_data.data])
+        df["ds"] = pd.to_datetime(df["ds"])
+
+        # Debug input data
+        print("Input DataFrame for prediction:")
+        print(df)
+
+        # Perform prediction
+        forecast = global_nn_model.predict(df)
+
+        # Debug raw forecast output
+        print("Raw forecast output:")
+        print(forecast)
+
+        # Serialize the 'ds' column to ISO 8601 string format
+        forecast_result = forecast.reset_index()
+        forecast_result["ds"] = forecast_result["ds"].dt.strftime("%Y-%m-%dT%H:%M:%SZ")  # Convert Timestamp to string
+        forecast_result = forecast_result.to_dict(orient="records")
+
+        # Debug processed forecast output
+        print("Processed forecast result:")
+        print(forecast_result)
+
+        return {"predictions": forecast_result}
     except Exception as e:
         print(f"Prediction error: {str(e)}")
-        print(f"Forecast type: {type(forecast) if 'forecast' in locals() else 'Not available'}")
-        if 'df' in locals():
-            print(f"Input data types:\n{df.dtypes}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(500, f"Prediction error: {str(e)}")
 
 @app.post("/evaluate")
-async def evaluate(request_data: RequestData):
+async def evaluate_model(evaluation_request: EvaluationRequest):
     try:
-        if not request_data.data:
-            raise HTTPException(status_code=422, detail="ไม่มีข้อมูลสำหรับประเมิน")
-        
-        data_point = request_data.data[0]
-        print(f"ข้อมูลที่ได้รับ: {data_point}")
-        
-        # ตรวจสอบการมีอยู่ของค่าทำนาย
-        if not last_predictions or '1' not in last_predictions:
-            print("ไม่พบค่าทำนายในระบบ")
-            raise HTTPException(status_code=404, detail="ไม่พบค่าทำนายล่าสุด")
-        
-        pred_data = last_predictions['1']
-        print(f"ค่าทำนายที่พบ: {pred_data}")
+        # Convert input data to DataFrames
+        actual_df = pd.DataFrame([dp.dict() for dp in evaluation_request.actual])
+        predictions_df = pd.DataFrame([dp.dict() for dp in evaluation_request.predictions])
 
-        # คำนวณค่าต่างๆ
-        actual_value = float(data_point.y)
-        predicted_value = float(pred_data['predicted'])
-        
-        mae = abs(actual_value - predicted_value)
-        mse = (actual_value - predicted_value) ** 2
+        # Ensure the 'ds' column is datetime for both
+        actual_df["ds"] = pd.to_datetime(actual_df["ds"])
+        predictions_df["ds"] = pd.to_datetime(predictions_df["ds"])
+
+        # Sort DataFrames by 'ds' (required for merge_asof)
+        actual_df = actual_df.sort_values("ds")
+        predictions_df = predictions_df.sort_values("ds")
+
+        # Merge with tolerance of 5 seconds
+        merged_df = pd.merge_asof(
+            actual_df, predictions_df, on="ds", direction="nearest", tolerance=pd.Timedelta("5s"), suffixes=("_actual", "_pred")
+        )
+
+        # Drop rows with invalid float values
+        merged_df = merged_df.replace([np.inf, -np.inf], np.nan).dropna(subset=["y_actual", "y_pred"])
+
+        if merged_df.empty:
+            raise HTTPException(400, "No valid data points available for evaluation after cleaning and merging.")
+
+        # Calculate evaluation metrics
+        mae = np.mean(np.abs(merged_df["y_actual"] - merged_df["y_pred"]))
+        mse = np.mean((merged_df["y_actual"] - merged_df["y_pred"]) ** 2)
         rmse = np.sqrt(mse)
-        mape = abs((actual_value - predicted_value) / actual_value) * 100 if actual_value != 0 else 0
-        
+        mape = np.mean(np.abs((merged_df["y_actual"] - merged_df["y_pred"]) / merged_df["y_actual"])) * 100
+
+        # Return the calculated metrics
         return {
-            "status": "success",
-            "timestamp": data_point.ds,
-            "actual": f"{actual_value:.2f}",
-            "predicted": f"{predicted_value:.2f}",
-            "metrics": {
-                "MAE": f"{mae:.2f}",
-                "MSE": f"{mse:.2f}",
-                "RMSE": f"{rmse:.2f}",
-                "MAPE": f"{mape:.2f}"
-            }
-        }
-            
-    except Exception as e:
-        print(f"เกิดข้อผิดพลาดทั่วไป: {str(e)}")
-        return {
-            "status": "error",
-            "message": f"เกิดข้อผิดพลาด: {str(e)}",
-            "request_data": str(request_data)
+            "mae": round(mae, 3),
+            "mse": round(mse, 3),
+            "rmse": round(rmse, 3),
+            "mape": round(mape, 3),
+            "message": "Evaluation metrics calculated successfully"
         }
 
-@app.post("/llm_query")
+    except ValueError as ve:
+        raise HTTPException(400, f"Invalid float values detected: {str(ve)}")
+    except Exception as e:
+        raise HTTPException(500, f"Error evaluating model: {str(e)}")
+
+
+
+@app.post("/llm")
 async def query_llm(request: LLMRequest):
     try:
-        # สร้าง coroutine สำหรับเรียก Ollama
         async def generate():
             response = client.generate(
                 model=request.model,
@@ -326,25 +187,10 @@ async def query_llm(request: LLMRequest):
                 max_tokens=request.max_tokens
             )
             return response
-
-        # รัน coroutine
         response = await asyncio.create_task(generate())
-
-        return {
-            "response": response['response'],
-            "model": request.model,
-            "status": "success",
-            "total_duration": response.get('total_duration'),
-            "load_duration": response.get('load_duration'),
-            "prompt_eval_count": response.get('prompt_eval_count'),
-            "eval_count": response.get('eval_count')
-        }
-
+        return {"response": response["response"]}
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error querying LLM: {str(e)}"
-        )
+        raise HTTPException(500, f"Error querying LLM: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
